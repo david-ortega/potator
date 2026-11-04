@@ -128,6 +128,36 @@ func TestDialerWithoutRuntime(t *testing.T) {
 	}
 }
 
+// TestTorArgsAlwaysRequestSocksPort guards a real bug: bine writes an empty
+// torrc, so Tor Browser's tor.exe opened no SOCKS listener and every dialer
+// failed with "Tor reported no SOCKS listener".
+func TestTorArgsAlwaysRequestSocksPort(t *testing.T) {
+	for _, cfg := range []Config{{}, {Fast: true}, {RemotePort: 1234}} {
+		args := torArgs(cfg)
+
+		socks := false
+		isolated := false
+		for i, arg := range args {
+			if arg == "--SocksPort" && i+1 < len(args) {
+				socks = true
+				isolated = strings.Contains(args[i+1], "IsolateSOCKSAuth")
+			}
+		}
+		if !socks {
+			t.Fatalf("torArgs(%+v) does not request a SOCKS port: %v", cfg, args)
+		}
+		if !isolated {
+			t.Errorf("torArgs(%+v) does not enable IsolateSOCKSAuth: %v", cfg, args)
+		}
+	}
+
+	// --fast is additive, not a replacement.
+	fast := strings.Join(torArgs(Config{Fast: true}), " ")
+	if !strings.Contains(fast, "ConnectionPadding") || !strings.Contains(fast, "SocksPort") {
+		t.Errorf("torArgs(Fast) lost one of its settings: %s", fast)
+	}
+}
+
 // fakeSocks is a minimal SOCKS5 server that records the credentials of every
 // handshake, so tests can prove that each stream gets its own circuit.
 type fakeSocks struct {

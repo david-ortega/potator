@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/cretz/bine/tor"
 	"github.com/cretz/bine/torutil/ed25519"
@@ -48,6 +49,9 @@ const (
 	// socksPassword is paired with the per-stream SOCKS username. Tor only
 	// needs the username to differ, but RFC 1929 carries both fields.
 	socksPassword = "potator"
+
+	// bootstrapTimeout bounds how long we wait for Tor to reach 100%.
+	bootstrapTimeout = 3 * time.Minute
 )
 
 // Config configures a Tor runtime.
@@ -126,16 +130,22 @@ func start(ctx context.Context, cfg Config) (*Runtime, error) {
 		return runtime, nil
 	}
 
-	startConf := &tor.StartConf{ExePath: cfg.TorPath, DebugWriter: cfg.Debug}
+	// bine's default torrc is empty, and it starts Tor with DisableNetwork 1. In
+	// that mode Tor opens no listeners at all, so we ask for the SOCKS port
+	// ourselves (suppressing bine's own "--SocksPort auto", which would add a
+	// second listener) and only query it after the network is enabled.
+	startConf := &tor.StartConf{
+		ExePath:         cfg.TorPath,
+		DebugWriter:     cfg.Debug,
+		NoAutoSocksPort: true,
+	}
 	if cfg.DataDir != "" {
 		startConf.DataDir = filepath.Join(cfg.DataDir, torDataName)
 		if err := os.MkdirAll(startConf.DataDir, 0o700); err != nil {
 			return nil, fmt.Errorf("onion: prepare Tor data directory: %w", err)
 		}
 	}
-	if cfg.Fast {
-		startConf.ExtraArgs = []string{"--ConnectionPadding", "0"}
-	}
+	startConf.ExtraArgs = torArgs(cfg)
 
 	instance, err := tor.Start(ctx, startConf)
 	if err != nil {
@@ -143,11 +153,36 @@ func start(ctx context.Context, cfg Config) (*Runtime, error) {
 	}
 	runtime.instance = instance
 
+	bootstrapCtx, cancel := context.WithTimeout(ctx, bootstrapTimeout)
+	defer cancel()
+	if err := instance.EnableNetwork(bootstrapCtx, true); err != nil {
+		runtime.Close()
+		return nil, fmt.Errorf("onion: bootstrap Tor: %w", err)
+	}
+
 	if err := runtime.resolveSocks(); err != nil {
 		runtime.Close()
 		return nil, err
 	}
 	return runtime, nil
+}
+
+// torArgs is the command line handed to Tor.
+//
+// A SOCKS listener is requested explicitly. bine generates an empty torrc, so
+// whatever the compiled-in defaults of the tor binary are, they decide whether
+// a SOCKS port exists at all -- and Tor Browser's tor.exe opens one only through
+// its own --defaults-torrc. Without this line every dialer fails with "Tor
+// reported no SOCKS listener".
+//
+// IsolateSOCKSAuth is what turns distinct per-stream credentials into distinct
+// circuits, which is the whole point of --parallel.
+func torArgs(cfg Config) []string {
+	args := []string{"--SocksPort", "auto IsolateSOCKSAuth"}
+	if cfg.Fast {
+		args = append(args, "--ConnectionPadding", "0")
+	}
+	return args
 }
 
 // resolveSocks asks the controller where Tor actually listens for SOCKS.
