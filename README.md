@@ -156,8 +156,9 @@ go test ./...        # no Tor needed: the onion tests run against a fake SOCKS s
 transport means implementing `Publish`/`Connect` there; the manifest, diff and
 transfer layers do not change.
 
-Pull requests run `gofmt`, `go vet`, the build and the full test suite on Linux,
-macOS and Windows.
+Pull requests run `gofmt`, `go vet`, the build and the full test suite on Linux and
+Windows, and every release cross-compiles for Linux, macOS and Windows (amd64 and
+arm64) on the Linux runner.
 
 ## License
 
