@@ -44,7 +44,9 @@ type Options struct {
 	Jobs int
 	// Cache, when set, avoids re-hashing unchanged files.
 	Cache *hashcache.Cache
-	// OnProgress is called with the bytes hashed so far and the total.
+	// OnProgress is called with the bytes hashed so far and the total. Calls are
+	// serialized and the reported values only grow, so the callback neither has
+	// to be safe for concurrent use nor has to handle values going backwards.
 	OnProgress func(done, total int64)
 }
 
@@ -85,6 +87,21 @@ func GenerateWithOptions(rootDir string, opts Options) (*Manifest, error) {
 	hashes := make([]string, len(entries))
 	var hashed atomic.Int64
 
+	// One mutex serialises every progress callback. Without it the hashing
+	// workers call OnProgress concurrently, which races with any callback that
+	// is not thread-safe -- the first version of this shipped that bug and the
+	// race detector caught it in CI. Reporting under the lock also keeps the
+	// byte counts monotonic.
+	var progressMu sync.Mutex
+	report := func(delta int64) {
+		if opts.OnProgress == nil {
+			return
+		}
+		progressMu.Lock()
+		defer progressMu.Unlock()
+		opts.OnProgress(hashed.Add(delta), totalBytes)
+	}
+
 	jobs := opts.Jobs
 	if jobs <= 0 {
 		jobs = runtime.GOMAXPROCS(0)
@@ -116,17 +133,11 @@ func GenerateWithOptions(rootDir string, opts Options) (*Manifest, error) {
 				// Reuse a cached digest when the file is untouched.
 				if sha, ok := opts.Cache.Lookup(e.absPath, e.size, e.modTime); ok {
 					hashes[i] = sha
-					if opts.OnProgress != nil {
-						opts.OnProgress(hashed.Add(e.size), totalBytes)
-					}
+					report(e.size)
 					continue
 				}
 
-				sha, err := hashFileBuffered(e.absPath, *bufferPtr, func(n int64) {
-					if opts.OnProgress != nil {
-						opts.OnProgress(hashed.Add(n), totalBytes)
-					}
-				})
+				sha, err := hashFileBuffered(e.absPath, *bufferPtr, report)
 				if err != nil {
 					select {
 					case errs <- err:
