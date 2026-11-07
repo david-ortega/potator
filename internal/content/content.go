@@ -183,10 +183,21 @@ func (h *handler) resolve(urlPath string) (string, error) {
 	}
 
 	fullPath := filepath.Join(h.root, filepath.FromSlash(relPath))
-	if fullPath != h.root && !strings.HasPrefix(fullPath, h.root+string(os.PathSeparator)) {
+
+	absRoot, err := filepath.Abs(h.root)
+	if err != nil {
+		return "", fmt.Errorf("content: resolve root: %w", err)
+	}
+	absFullPath, err := filepath.Abs(fullPath)
+	if err != nil {
+		return "", fmt.Errorf("content: resolve path: %w", err)
+	}
+
+	relToRoot, err := filepath.Rel(absRoot, absFullPath)
+	if err != nil || relToRoot == ".." || strings.HasPrefix(relToRoot, ".."+string(os.PathSeparator)) {
 		return "", fmt.Errorf("content: %q is outside the shared folder", urlPath)
 	}
-	return fullPath, nil
+	return absFullPath, nil
 }
 
 // contentTypeFor guesses a MIME type from the file extension.
